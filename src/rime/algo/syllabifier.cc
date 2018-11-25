@@ -21,7 +21,8 @@ using VertexQueue = std::priority_queue<Vertex,
 int Syllabifier::BuildSyllableGraph(const string &input,
                             Prism &prism,
                             SyllableGraph *graph,
-                            bool correction) {
+                            bool correction,
+                            Corrector *corrector) {
   if (input.empty())
     return 0;
 
@@ -55,8 +56,8 @@ int Syllabifier::BuildSyllableGraph(const string &input,
       matches_set.insert(m.value);
     }
     if (correction) {
-      NearSearchCorrector corrector;
-      auto corrections = corrector.ToleranceSearch(prism, current_input, 5);
+//      NearSearchCorrector corrector;
+      auto corrections = corrector->ToleranceSearch(prism, current_input, 4);
       for (const auto &m : corrections) {
         matches.push_back({ m.syllable, m.length });
 //        SpellingAccessor accessor(prism.QuerySpelling(m.syllable));
@@ -149,7 +150,7 @@ int Syllabifier::BuildSyllableGraph(const string &input,
   good.insert(farthest);
   // fuzzy spellings are immune to invalidation by normal spellings
   SpellingType last_type = (std::max)(graph->vertices[farthest],
-                                      kCorrection);
+                                      kFuzzySpelling);
   for (int i = farthest - 1; i >= 0; --i) {
     if (graph->vertices.find(i) == graph->vertices.end())
       continue;

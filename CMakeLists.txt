@@ -146,7 +146,7 @@ if(MSVC)
 endif()
 
 if(UNIX)
-  add_definitions("-std=c++11")
+  add_definitions("-std=c++14")
 endif()
 
 if(NOT DEFINED LIB_INSTALL_DIR)

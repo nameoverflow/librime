@@ -66,11 +66,54 @@ class RimeCorrectorTest : public ::testing::Test {
   rime::the<rime::Prism> prism_;
 };
 
+class RimeCorrectorANNTest : public ::testing::Test {
+ public:
+  void SetUp() override {
+    rime::vector<rime::string> syllables;
+    syllables.emplace_back("chang");  // 0
+    syllables.emplace_back("tuan");   // 1
+    std::sort(syllables.begin(), syllables.end());
+    for (size_t i = 0; i < syllables.size(); ++i) {
+      syllable_id_[syllables[i]] = i;
+    }
+
+    prism_.reset(new rime::Prism("corrector_ann_test.prism.bin"));
+    ann_.reset(new rime::ANNCorrector("corrector_ann_test.nsw.bin"));
+    rime::set<rime::string> keyset;
+    std::copy(syllables.begin(), syllables.end(),
+              std::inserter(keyset, keyset.begin()));
+    prism_->Build(keyset);
+    ann_->Build(keyset, *prism_);
+
+  }
+  void TearDown() override {}
+ protected:
+  rime::map<rime::string, rime::SyllableId> syllable_id_;
+  rime::the<rime::Prism> prism_;
+  rime::the<rime::ANNCorrector> ann_;
+};
+
+
 TEST_F(RimeCorrectorSearchTest, CaseNearSubstitute) {
   rime::Syllabifier s;
   rime::SyllableGraph g;
   const rime::string input("chsng");
   s.BuildSyllableGraph(input, *prism_, &g, true);
+  EXPECT_EQ(input.length(), g.input_length);
+  EXPECT_EQ(input.length(), g.interpreted_length);
+  EXPECT_EQ(2, g.vertices.size());
+  ASSERT_FALSE(g.vertices.end() == g.vertices.find(5));
+  EXPECT_EQ(rime::kCorrection, g.vertices[5]);
+  rime::SpellingMap& sp(g.edges[0][5]);
+  EXPECT_EQ(1, sp.size());
+  ASSERT_FALSE(sp.end() == sp.find(syllable_id_["chang"]));
+  EXPECT_EQ(rime::kCorrection, sp[0].type);
+}
+TEST_F(RimeCorrectorANNTest, CaseNearSubstitute) {
+  rime::Syllabifier s;
+  rime::SyllableGraph g;
+  const rime::string input("chsng");
+  s.BuildSyllableGraph(input, *prism_, &g, true, ann_.get());
   EXPECT_EQ(input.length(), g.input_length);
   EXPECT_EQ(input.length(), g.interpreted_length);
   EXPECT_EQ(2, g.vertices.size());

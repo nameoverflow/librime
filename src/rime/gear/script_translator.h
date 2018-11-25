@@ -46,6 +46,7 @@ class ScriptTranslator : public Translator,
   int spelling_hints_ = 0;
   bool always_show_comments_ = false;
   bool enable_correction_ = false;
+  an<Corrector> corrector_;
 };
 
 }  // namespace rime

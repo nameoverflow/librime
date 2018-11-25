@@ -231,24 +231,6 @@ bool DictCompiler::BuildPrism(const string &schema_file,
         script.clear();
       }
     }
-
-    // build corrector
-//    bool enable_correction = false; // Avoid if initializer to comfort compilers
-//    if (config.GetBool("speller/enable_correction", &enable_correction) &&
-//        enable_correction) {
-//      boost::filesystem::path corrector_path(prism_->file_name());
-//      corrector_path.replace_extension("");
-//      corrector_path.replace_extension(".correction.bin");
-//      correction_ = New<Corrector>(RelocateToUserDirectory(prefix_, corrector_path.string()));
-//      if (correction_->Exists()) {
-//        correction_->Remove();
-//      }
-//      if (!correction_->Build(syllabary, &script,
-//                         dict_file_checksum, schema_file_checksum) ||
-//          !correction_->Save()) {
-//        return false;
-//      }
-//    }
   }
   if ((options_ & kDump) && !script.empty()) {
     boost::filesystem::path path(prism_->file_name());
@@ -261,6 +243,32 @@ bool DictCompiler::BuildPrism(const string &schema_file,
     if (!prism_->Build(syllabary, script.empty() ? nullptr : &script,
                        dict_file_checksum, schema_file_checksum) ||
         !prism_->Save()) {
+      return false;
+    }
+  }
+  // build corrector
+  Config config;
+  if (!config.LoadFromFile(schema_file)) {
+    LOG(ERROR) << "error loading prism definition from " << schema_file;
+    return false;
+  }
+  bool enable_correction = false; // Avoid if initializer to comfort compilers
+  if (config.GetBool("translator/enable_correction", &enable_correction) &&
+      enable_correction) {
+    boost::filesystem::path corrector_path(prism_->file_name());
+    corrector_path.replace_extension("");
+    corrector_path.replace_extension(".nsw.bin");
+    auto corrector = New<ANNCorrector>(RelocateToUserDirectory(prefix_, corrector_path.string()));
+    if (corrector->Exists()) {
+      corrector->Remove();
+    }
+    bool success = false;
+    if (!script.empty()) {
+      success = corrector->Build(script, *prism_);
+    } else {
+      success = corrector->Build(syllabary, *prism_);
+    }
+    if (!success || !corrector->Save()) {
       return false;
     }
   }

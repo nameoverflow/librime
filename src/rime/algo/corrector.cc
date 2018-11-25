@@ -71,8 +71,6 @@ void DFSCollect(const string &origin, const string &current, size_t ed, Script &
 /// \param output pointer to the vector to set. Will be padded by zero.
 void WordEmbedding(const string &input, vector<float> *output);
 
-using Corrector::Correction;
-
 Script CorrectionCollector::Collect(size_t edit_distance) {
   // TODO: specifically for 1 length str
   Script script;
@@ -223,7 +221,7 @@ bool EditDistanceCorrector::Build(const Syllabary &syllabary,
   return Prism::Build(syllabary, &correction_script, dict_file_checksum, schema_file_checksum);
 }
 
-vector<Correction>
+vector<Corrector::Correction>
 NearSearchCorrector::ToleranceSearch(const Prism& prism, const string &key, float tolerance) {
   vector<Correction> result;
   if (key.empty())
@@ -265,60 +263,65 @@ NearSearchCorrector::ToleranceSearch(const Prism& prism, const string &key, floa
   return result;
 }
 
-bool ANNCorrector::Build(const Syllabary &syllabary) {
-  size_t size = syllabary.size();
-  idx_to_spelling_.reserve(size);
+bool ANNCorrector::Build(const Syllabary &syllabary, Prism &prism) {
+  data_size_ = syllabary.size();
+  vector<string> spellings;
+  spellings.reserve(data_size_);
   for (auto &s : syllabary) {
     dim_ = std::max(dim_, 2 * s.size());
-    idx_to_spelling_.push_back(s);
+    spellings.push_back(s);
   }
-  return BuildHNSW();
+  return BuildHNSW(prism, spellings);
 }
 
-bool ANNCorrector::Build(const Script &script) {
-  size_t size = script.size();
-  idx_to_spelling_.reserve(size);
+bool ANNCorrector::Build(const Script &script, Prism &prism) {
+  data_size_ = script.size();
+  vector<string> spellings;
+  spellings.reserve(data_size_);
   for (auto &s : script) {
     dim_ = std::max(dim_, 2 * s.first.size());
-    idx_to_spelling_.push_back(s.first);
+    spellings.push_back(s.first);
   }
-  return BuildHNSW();
+  return BuildHNSW(prism, spellings);
 }
 
-vector<Correction> ANNCorrector::ToleranceSearch(const Prism &prism, const string &key, float tolerance) {
+vector<Corrector::Correction> ANNCorrector::ToleranceSearch(const Prism &prism, const string &key, float tolerance) {
   vector<Correction> result;
   vector<float> embedded(2 * dim_);
 
-  for (size_t point = 1; point <= dim_ && point < key.size(); point++) {
+  for (size_t point = 1; point <= dim_ && point <= key.size(); point++) {
     auto search_key = key.substr(0, point);
     WordEmbedding(search_key, &embedded);
-    auto neighbors = alg_->searchKnn(&embedded[0], 3);
-    for (; !neighbors.empty() && neighbors.top().first < tolerance; neighbors.pop()) {
+    auto neighbors = alg_->searchKnn(&embedded[0], 10);
+    for (; !neighbors.empty(); neighbors.pop()) {
       auto &rec = neighbors.top();
-      int sy_id = 0;
-      if (search_key == idx_to_spelling_[rec.second] || !prism.GetValue(search_key, &sy_id))
+      if (std::pow(neighbors.top().first, 2) > tolerance)
         continue;
       ;
-      result.emplace_back(rec.first, (size_t)sy_id, point);
+      result.push_back({ rec.first, (SyllableId)rec.second, point });
     }
   }
 
   return result;
 }
 
-bool ANNCorrector::BuildHNSW() {
-  metric_ = std::make_unique<hnswlib::L2Space>(dim_);
-  alg_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(metric_.get(), idx_to_spelling_.size());
+bool ANNCorrector::BuildHNSW(Prism &prism, vector<string>& spellings) {
+  metric_ = std::make_shared<hnswlib::L2Space>(dim_);
+  alg_ = std::make_shared<hnswlib::HierarchicalNSW<float>>(metric_.get(), spellings.size());
 
   if (!metric_ || !alg_) {
     return false;
   }
 
   vector<float> embedded(2 * dim_);
-  for (size_t i = 0; i < idx_to_spelling_.size(); i++) {
-    WordEmbedding(idx_to_spelling_[i], &embedded);
-    alg_->addPoint(&embedded[0], i);
+  for (auto &s : spellings) {
+    WordEmbedding(s, &embedded);
+    SyllableId id;
+    prism.GetValue(s, &id);
+    alg_->addPoint(&embedded[0], (size_t)id);
   }
+
+  Create(sizeof(Metadata));
 
   metadata_ = Allocate<Metadata>();
   if (!metadata_) {
@@ -329,11 +332,6 @@ bool ANNCorrector::BuildHNSW() {
   metadata_->data_size = data_size_;
   metadata_->dim = dim_;
 
-  metadata_->idx_to_spelling = CreateArray<String>(data_size_);
-  for (auto i = 0; i < idx_to_spelling_.size(); i++) {
-    CopyString(idx_to_spelling_[i], &metadata_->idx_to_spelling->at[i]);
-  }
-
   boost::filesystem::path path(file_name());
   path.replace_extension("index");
   alg_->saveIndex(path.string());
@@ -341,7 +339,6 @@ bool ANNCorrector::BuildHNSW() {
   return true;
 }
 bool ANNCorrector::Load() {
-
   if (IsOpen())
     Close();
 
@@ -360,11 +357,8 @@ bool ANNCorrector::Load() {
   data_size_ = metadata_->data_size;
   dim_ = metadata_->dim;
 
-  metric_ = std::make_unique<hnswlib::L2Space>(dim_);
-
-  for (auto &s : *metadata_->idx_to_spelling) {
-    idx_to_spelling_.emplace_back(s.c_str());
-  }
+  metric_ = std::make_shared<hnswlib::L2Space>(dim_);
+  alg_ = std::make_shared<hnswlib::HierarchicalNSW<float>>(metric_.get(), data_size_);
 
   boost::filesystem::path path(file_name());
   path.replace_extension("index");
@@ -377,7 +371,55 @@ bool ANNCorrector::Save() {
 }
 
 void WordEmbedding(const string &input, vector<float> *output) {
-  static map<char, std::array<float, 2>> kQWERTLayout = {}; // TODO
+  static map<char, std::array<float, 2>> kQWERTLayout = {
+      {'1', {10.000000, 10.000000}},
+      {'2', {10.000000, 11.000000}},
+      {'3', {10.000000, 12.000000}},
+      {'4', {10.000000, 13.000000}},
+      {'5', {10.000000, 14.000000}},
+      {'6', {10.000000, 15.000000}},
+      {'7', {10.000000, 16.000000}},
+      {'8', {10.000000, 17.000000}},
+      {'9', {10.000000, 18.000000}},
+      {'0', {10.000000, 19.000000}},
+      {'-', {10.000000, 20.000000}},
+      {'=', {10.000000, 21.000000}},
+      {' ', {10.000000, 22.000000}},
+      {'q', {13.000000, 10.500000}},
+      {'w', {13.000000, 11.500000}},
+      {'e', {13.000000, 12.500000}},
+      {'r', {13.000000, 13.500000}},
+      {'t', {13.000000, 14.500000}},
+      {'y', {13.000000, 15.500000}},
+      {'u', {13.000000, 16.500000}},
+      {'i', {13.000000, 17.500000}},
+      {'o', {13.000000, 18.500000}},
+      {'p', {13.000000, 19.500000}},
+      {'[', {13.000000, 20.500000}},
+      {']', {13.000000, 21.500000}},
+      {'\\', {13.000000, 22.500000}},
+      {'a', {16.000000, 11.000000}},
+      {'s', {16.000000, 12.000000}},
+      {'d', {16.000000, 13.000000}},
+      {'f', {16.000000, 14.000000}},
+      {'g', {16.000000, 15.000000}},
+      {'h', {16.000000, 16.000000}},
+      {'j', {16.000000, 17.000000}},
+      {'k', {16.000000, 18.000000}},
+      {'l', {16.000000, 19.000000}},
+      {';', {16.000000, 20.000000}},
+      {'\'', {16.000000, 21.000000}},
+      {'z', {19.000000, 11.500000}},
+      {'x', {19.000000, 12.500000}},
+      {'c', {19.000000, 13.500000}},
+      {'v', {19.000000, 14.500000}},
+      {'b', {19.000000, 15.500000}},
+      {'n', {19.000000, 16.500000}},
+      {'m', {19.000000, 17.500000}},
+      {',', {19.000000, 18.500000}},
+      {'.', {19.000000, 19.500000}},
+      {'/', {19.000000, 20.500000}},
+    };
 
   std::fill(output->begin(), output->end(), 0.0);
   for (size_t i = 0; i < input.size(); i++) {

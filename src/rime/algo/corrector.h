@@ -17,7 +17,8 @@
 namespace hnswlib {
 template<typename dist_t>
 class HierarchicalNSW;
-class L2Space;
+template<typename MTYPE>
+class SpaceInterface;
 };
 
 namespace rime {
@@ -78,8 +79,8 @@ class ANNCorrector : public Corrector,
                      public MappedFile {
  public:
   explicit ANNCorrector(const string& filename): MappedFile(filename) {};
-  RIME_API bool Build(const Syllabary& syllabary);
-  RIME_API bool Build(const Script& script);
+  RIME_API bool Build(const Syllabary& syllabary, Prism &prism);
+  RIME_API bool Build(const Script& script, Prism &prism);
   RIME_API bool Load();
   RIME_API bool Save();
 
@@ -89,15 +90,13 @@ class ANNCorrector : public Corrector,
   using Metadata = struct {
     size_t data_size = 0;
     size_t dim = 0;
-    OffsetPtr<Array<String>> idx_to_spelling;
   };
-  bool BuildHNSW();
-  the<hnswlib::HierarchicalNSW<float>> alg_;
-  the<hnswlib::L2Space> metric_;
+  bool BuildHNSW(Prism &prism, vector<string>& spellings);
+  an<hnswlib::HierarchicalNSW<float>> alg_;
+  an<hnswlib::SpaceInterface<float>> metric_;
   Metadata *metadata_;
   size_t data_size_ = 0;
   size_t dim_ = 0;
-  vector<string> idx_to_spelling_;
 };
 
 } // namespace rime

@@ -16,9 +16,11 @@
 #include <rime/context.h>
 #include <rime/engine.h>
 #include <rime/schema.h>
+#include <rime/service.h>
 #include <rime/translation.h>
 #include <rime/dict/dictionary.h>
 #include <rime/algo/syllabifier.h>
+#include <rime/algo/corrector.h>
 #include <rime/gear/poet.h>
 #include <rime/gear/script_translator.h>
 #include <rime/gear/translator_commons.h>
@@ -76,7 +78,7 @@ class ScriptSyllabifier : public PhraseSyllabifier {
   }
 
   virtual Spans Syllabify(const Phrase* phrase);
-  size_t BuildSyllableGraph(Prism& prism, bool correction = false);
+  size_t BuildSyllableGraph(Prism& prism, bool correction = false, Corrector *corrector = nullptr);
   string GetPreeditString(const Phrase& cand) const;
   string GetOriginalSpelling(const Phrase& cand) const;
   bool IsCandidateCorrection(const Phrase& cand) const;
@@ -94,10 +96,12 @@ class ScriptTranslation : public Translation {
  public:
   ScriptTranslation(ScriptTranslator* translator,
                     const string& input, size_t start,
-                    bool enable_correction = false)
+                    bool enable_correction = false,
+                    an<Corrector> corrector = nullptr)
       : translator_(translator), start_(start),
         syllabifier_(New<ScriptSyllabifier>(translator, input, start)),
-        enable_correction_(enable_correction) {
+        enable_correction_(enable_correction),
+        corrector_(corrector) {
     set_exhausted(true);
   }
   bool Evaluate(Dictionary* dict, UserDictionary* user_dict);
@@ -129,6 +133,7 @@ class ScriptTranslation : public Translation {
   size_t corrections_count_ = 0;
 
   bool enable_correction_;
+  an<Corrector> corrector_;
 };
 
 // ScriptTranslator implementation
@@ -144,6 +149,18 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
     config->GetBool(name_space_ + "/always_show_comments",
                     &always_show_comments_);
     config->GetBool(name_space_ + "/enable_correction", &enable_correction_);
+    if (enable_correction_) {
+      auto dict_name = dict_->name();
+      ResourceType correction_resource({ "corrector", "build/", ".nsw.bin" });
+      the<ResourceResolver> resolver(
+          Service::instance().CreateResourceResolver(correction_resource)
+        );
+      auto corrector_path = resolver->ResolvePath(dict_name);
+      auto corrector = std::make_shared<ANNCorrector>(corrector_path.string());
+      corrector->Load();
+      corrector_ = corrector;
+    }
+
   }
 }
 
@@ -162,7 +179,7 @@ an<Translation> ScriptTranslator::Query(const string& input,
       !IsUserDictDisabledFor(input);
 
   // the translator should survive translations it creates
-  auto result = New<ScriptTranslation>(this, input, segment.start, enable_correction_);
+  auto result = New<ScriptTranslation>(this, input, segment.start, enable_correction_, corrector_);
   if (!result ||
       !result->Evaluate(dict_.get(),
                         enable_user_dict ? user_dict_.get() : NULL)) {
@@ -233,14 +250,15 @@ Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
   return result;
 }
 
-size_t ScriptSyllabifier::BuildSyllableGraph(Prism& prism, bool correction) {
+size_t ScriptSyllabifier::BuildSyllableGraph(Prism& prism, bool correction, Corrector *corrector) {
   Syllabifier syllabifier(translator_->delimiters(),
                           translator_->enable_completion(),
                           translator_->strict_spelling());
   auto consumed = (size_t)syllabifier.BuildSyllableGraph(input_,
                                                    prism,
                                                    &syllable_graph_,
-                                                   correction);
+                                                   correction,
+                                                   correction ? corrector : nullptr);
 
   return consumed;
 }
@@ -325,7 +343,7 @@ string ScriptSyllabifier::GetOriginalSpelling(const Phrase& cand) const {
 // ScriptTranslation implementation
 
 bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
-  size_t consumed = syllabifier_->BuildSyllableGraph(*dict->prism(), translator_->enable_correction());
+  size_t consumed = syllabifier_->BuildSyllableGraph(*dict->prism(), translator_->enable_correction(), corrector_.get());
   const auto& syllable_graph = syllabifier_->syllable_graph();
 
   phrase_ = dict->Lookup(syllable_graph, 0);
