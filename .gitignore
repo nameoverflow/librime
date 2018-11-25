@@ -6,6 +6,7 @@ xdebug/
 build.log
 data/*
 thirdparty/include/*
+!thirdparty/include/hnswlib
 thirdparty/lib/*
 thirdparty/bin/*
 thirdparty/data/*

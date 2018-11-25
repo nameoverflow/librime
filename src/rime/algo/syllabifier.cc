@@ -56,7 +56,7 @@ int Syllabifier::BuildSyllableGraph(const string &input,
     }
     if (correction) {
       NearSearchCorrector corrector;
-      auto corrections = corrector.ToleranceSearch(prism, current_input);
+      auto corrections = corrector.ToleranceSearch(prism, current_input, 5);
       for (const auto &m : corrections) {
         matches.push_back({ m.syllable, m.length });
 //        SpellingAccessor accessor(prism.QuerySpelling(m.syllable));

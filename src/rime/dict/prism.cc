@@ -251,7 +251,7 @@ bool Prism::HasKey(const string& key) {
   return value != -1;
 }
 
-bool Prism::GetValue(const string& key, int* value) {
+bool Prism::GetValue(const string& key, int* value) const {
   int result = trie_->exactMatchSearch<int>(key.c_str());
   if (result == -1) {
     return false;

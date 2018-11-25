@@ -8,11 +8,14 @@
 #include <numeric>
 #include <algorithm>
 #include <queue>
+#include <array>
+#include <map>
+#include <hnswlib/hnswlib.h>
 #include "corrector.h"
 
 using namespace rime;
 
-static hash_map<char, hash_set<char>> keyboard_map = {
+static hash_map<char, hash_set<char>> kKeyboardMap = {
     {'1', {'2', 'q', 'w'}},
     {'2', {'1', '3', 'q', 'w', 'e'}},
     {'3', {'2', '4', 'w', 'e', 'r'}},
@@ -63,6 +66,13 @@ static hash_map<char, hash_set<char>> keyboard_map = {
 
 void DFSCollect(const string &origin, const string &current, size_t ed, Script &result);
 
+/// Embedding a word into the metric space, means converting a string to a vector.
+/// \param input word as string
+/// \param output pointer to the vector to set. Will be padded by zero.
+void WordEmbedding(const string &input, vector<float> *output);
+
+using Corrector::Correction;
+
 Script CorrectionCollector::Collect(size_t edit_distance) {
   // TODO: specifically for 1 length str
   Script script;
@@ -87,7 +97,7 @@ void DFSCollect(const string &origin, const string &current, size_t ed, Script &
   }
 }
 
-vector<Prism::Match> Corrector::SymDeletePrefixSearch(const string& key) {
+vector<Prism::Match> EditDistanceCorrector::SymDeletePrefixSearch(const string& key) {
   if (key.empty())
     return {};
   size_t key_len = key.length();
@@ -127,7 +137,7 @@ vector<Prism::Match> Corrector::SymDeletePrefixSearch(const string& key) {
 
 inline uint8_t SubstCost(char left, char right) {
   if (left == right) return 0;
-  if (keyboard_map[left].find(right) != keyboard_map[left].end()) {
+  if (kKeyboardMap[left].find(right) != kKeyboardMap[left].end()) {
     return 1;
   }
   return 4;
@@ -135,7 +145,7 @@ inline uint8_t SubstCost(char left, char right) {
 
 // This nice O(min(m, n)) implementation is from
 // https://en.wikibooks.org/wiki/Algorithm_Implementation/Strings/Levenshtein_distance#C++
-uint8_t Corrector::LevenshteinDistance(const std::string &s1, const std::string &s2) {
+uint8_t EditDistanceCorrector::LevenshteinDistance(const std::string &s1, const std::string &s2) {
   // To change the type this function manipulates and returns, change
   // the return type and the types of the two variables below.
   auto s1len = (size_t)s1.size();
@@ -167,7 +177,7 @@ uint8_t Corrector::LevenshteinDistance(const std::string &s1, const std::string 
 }
 
 // L's distance with transposition allowed
-uint8_t Corrector::RestrictedDistance(const std::string& s1, const std::string& s2)
+uint8_t EditDistanceCorrector::RestrictedDistance(const std::string& s1, const std::string& s2)
 {
   auto len1 = s1.size(), len2 = s2.size();
   vector<size_t> d((len1 + 1) * (len2 + 1));
@@ -194,7 +204,7 @@ uint8_t Corrector::RestrictedDistance(const std::string& s1, const std::string& 
     }
   return (uint8_t)d[index(len1, len2)];
 }
-bool Corrector::Build(const Syllabary &syllabary,
+bool EditDistanceCorrector::Build(const Syllabary &syllabary,
                       const Script *script,
                       uint32_t dict_file_checksum,
                       uint32_t schema_file_checksum) {
@@ -213,8 +223,8 @@ bool Corrector::Build(const Syllabary &syllabary,
   return Prism::Build(syllabary, &correction_script, dict_file_checksum, schema_file_checksum);
 }
 
-vector<NearSearchCorrector::Correction>
-NearSearchCorrector::ToleranceSearch(const Prism& prism, const string &key, size_t tolerance) {
+vector<Correction>
+NearSearchCorrector::ToleranceSearch(const Prism& prism, const string &key, float tolerance) {
   vector<Correction> result;
   if (key.empty())
     return result;
@@ -222,13 +232,13 @@ NearSearchCorrector::ToleranceSearch(const Prism& prism, const string &key, size
   using record = struct {
     size_t node_pos;
     size_t idx;
-    size_t distance;
+    float distance;
     char ch;
   };
 
   std::queue<record> queue;
   queue.push({ 0, 0, 0, key[0] });
-  for (auto subst : keyboard_map[key[0]]) {
+  for (auto subst : kKeyboardMap[key[0]]) {
     queue.push({ 0, 0, 1, subst });
   }
   for (; !queue.empty(); queue.pop()) {
@@ -246,11 +256,133 @@ NearSearchCorrector::ToleranceSearch(const Prism& prism, const string &key, size
     if (rec.idx < key.size()) {
       queue.push({ rec.node_pos, rec.idx, rec.distance, key[rec.idx] });
       if (rec.distance < tolerance) {
-        for (auto subst : keyboard_map[key[rec.idx]]) {
+        for (auto subst : kKeyboardMap[key[rec.idx]]) {
           queue.push({ rec.node_pos, rec.idx, rec.distance + 1, subst });
         }
       }
     }
   }
   return result;
+}
+
+bool ANNCorrector::Build(const Syllabary &syllabary) {
+  size_t size = syllabary.size();
+  idx_to_spelling_.reserve(size);
+  for (auto &s : syllabary) {
+    dim_ = std::max(dim_, 2 * s.size());
+    idx_to_spelling_.push_back(s);
+  }
+  return BuildHNSW();
+}
+
+bool ANNCorrector::Build(const Script &script) {
+  size_t size = script.size();
+  idx_to_spelling_.reserve(size);
+  for (auto &s : script) {
+    dim_ = std::max(dim_, 2 * s.first.size());
+    idx_to_spelling_.push_back(s.first);
+  }
+  return BuildHNSW();
+}
+
+vector<Correction> ANNCorrector::ToleranceSearch(const Prism &prism, const string &key, float tolerance) {
+  vector<Correction> result;
+  vector<float> embedded(2 * dim_);
+
+  for (size_t point = 1; point <= dim_ && point < key.size(); point++) {
+    auto search_key = key.substr(0, point);
+    WordEmbedding(search_key, &embedded);
+    auto neighbors = alg_->searchKnn(&embedded[0], 3);
+    for (; !neighbors.empty() && neighbors.top().first < tolerance; neighbors.pop()) {
+      auto &rec = neighbors.top();
+      int sy_id = 0;
+      if (search_key == idx_to_spelling_[rec.second] || !prism.GetValue(search_key, &sy_id))
+        continue;
+      ;
+      result.emplace_back(rec.first, (size_t)sy_id, point);
+    }
+  }
+
+  return result;
+}
+
+bool ANNCorrector::BuildHNSW() {
+  metric_ = std::make_unique<hnswlib::L2Space>(dim_);
+  alg_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(metric_.get(), idx_to_spelling_.size());
+
+  if (!metric_ || !alg_) {
+    return false;
+  }
+
+  vector<float> embedded(2 * dim_);
+  for (size_t i = 0; i < idx_to_spelling_.size(); i++) {
+    WordEmbedding(idx_to_spelling_[i], &embedded);
+    alg_->addPoint(&embedded[0], i);
+  }
+
+  metadata_ = Allocate<Metadata>();
+  if (!metadata_) {
+    LOG(ERROR) << "Error creating metadata in file '" << file_name() << "'.";
+    return false;
+  }
+
+  metadata_->data_size = data_size_;
+  metadata_->dim = dim_;
+
+  metadata_->idx_to_spelling = CreateArray<String>(data_size_);
+  for (auto i = 0; i < idx_to_spelling_.size(); i++) {
+    CopyString(idx_to_spelling_[i], &metadata_->idx_to_spelling->at[i]);
+  }
+
+  boost::filesystem::path path(file_name());
+  path.replace_extension("index");
+  alg_->saveIndex(path.string());
+
+  return true;
+}
+bool ANNCorrector::Load() {
+
+  if (IsOpen())
+    Close();
+
+  if (!OpenReadOnly()) {
+    LOG(ERROR) << "error opening file '" << file_name() << "'.";
+    return false;
+  }
+
+  metadata_ = Find<Metadata>(0);
+  if (!metadata_) {
+    LOG(ERROR) << "metadata not found.";
+    Close();
+    return false;
+  }
+
+  data_size_ = metadata_->data_size;
+  dim_ = metadata_->dim;
+
+  metric_ = std::make_unique<hnswlib::L2Space>(dim_);
+
+  for (auto &s : *metadata_->idx_to_spelling) {
+    idx_to_spelling_.emplace_back(s.c_str());
+  }
+
+  boost::filesystem::path path(file_name());
+  path.replace_extension("index");
+  alg_->loadIndex(path.string(), metric_.get(), data_size_);
+
+  return true;
+}
+bool ANNCorrector::Save() {
+  return false;
+}
+
+void WordEmbedding(const string &input, vector<float> *output) {
+  static map<char, std::array<float, 2>> kQWERTLayout = {}; // TODO
+
+  std::fill(output->begin(), output->end(), 0.0);
+  for (size_t i = 0; i < input.size(); i++) {
+    auto &keyboard_pos = kQWERTLayout[input[i]];
+    (*output)[i] = keyboard_pos[0];
+    (*output)[i + 1] = keyboard_pos[1];
+  }
 }
